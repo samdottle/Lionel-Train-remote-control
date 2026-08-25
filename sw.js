@@ -1,4 +1,4 @@
-const CACHE='o27-v1.0';
+const CACHE='o27-v1.1';
 const ASSETS=['./','./index.html','./manifest.json','./icon-192.png','./icon-512.png'];
 self.addEventListener('install',e=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)));

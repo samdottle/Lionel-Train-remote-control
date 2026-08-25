@@ -1,8 +1,25 @@
 <!DOCTYPE html>
 <!--
   O27 Controller — Web App
-  Version: 1.0
-  Date:    2026-08-21
+  Version: 1.1
+  Date:    2026-08-24
+
+  New in v1.1:
+    - Horn button is now genuinely press-and-hold: it sends held=1 on
+      press and held=0 on release (mouse and touch, including release on
+      drag-off so it can never get stuck showing "pressed"), matching a
+      firmware change (v1.6) where the real AC1803000 whistle sounds for
+      as long as its button is held, not a fixed blip — Reverse stays a
+      single momentary tap, since that one really is one-shot on the real
+      hardware.
+    - Horn and Reverse BLE write failures now show an error toast instead
+      of failing silently (previously an empty catch block) — added while
+      diagnosing a "buttons don't seem to do anything" report, so the
+      next attempt actually shows whether the write itself is failing.
+      Throttle's write path deliberately still fails silently — it writes
+      every ~80ms while dragging, so a toast there would spam during
+      normal use; if throttle writes need the same treatment later, that
+      needs a debounced/rate-limited error toast, not this same pattern.
 
   New in v1.0 (initial version):
     - First pass at a UI while the bench hardware (Nano ESP32 + 28BYJ-48 +
@@ -75,7 +92,7 @@ const h=React.createElement;
 // ── BLE service (must match firmware/o27_controller/include/config.h) ─────────
 const SERVICE_UUID   ='0027aaa0-0001-4000-8000-00805f9b0027';
 const THROTTLE_UUID  ='0027aaa1-0001-4000-8000-00805f9b0027'; // write, 1 byte 0-100
-const HORN_UUID      ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, momentary
+const HORN_UUID      ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, hold (nonzero=held, 0=released)
 const DIRECTION_UUID ='0027aaa3-0001-4000-8000-00805f9b0027'; // write, momentary
 const STATUS_UUID    ='0027aaa4-0001-4000-8000-00805f9b0027'; // read+notify, JSON
 
@@ -175,6 +192,7 @@ function App(){
 
   const onDisc=useCallback(()=>{
     setIsConnected(false);
+    setHornPressed(false);
     throttleCharRef.current=null;hornCharRef.current=null;directionCharRef.current=null;
     toast('Disconnected');
   },[toast]);
@@ -241,14 +259,31 @@ function App(){
     toast('Emergency stop','error');
   },[isConnected,writeThrottle,toast]);
 
-  const fireHorn=useCallback(async()=>{
-    if(!hornCharRef.current)return;
-    try{await hornCharRef.current.writeValue(new Uint8Array([1]));}catch(_){}
-  },[]);
+  const [hornPressed,setHornPressed]=useState(false);
+
+  const sendHorn=useCallback(async held=>{
+    if(!hornCharRef.current){toast('Not connected','error');return;}
+    try{
+      await hornCharRef.current.writeValue(new Uint8Array([held?1:0]));
+    }catch(e){
+      toast('Horn command failed: '+e.message,'error');
+    }
+  },[toast]);
+
+  // Press-and-hold: fires on press, releases on lift-off — covers both
+  // mouse and touch, and fires the "released" write even if the pointer
+  // drags off the button while held, so it can never get stuck on.
+  const hornDown=useCallback(e=>{e.preventDefault();setHornPressed(true);sendHorn(true);},[sendHorn]);
+  const hornUp=useCallback(e=>{e.preventDefault();setHornPressed(false);sendHorn(false);},[sendHorn]);
+
   const fireDirection=useCallback(async()=>{
-    if(!directionCharRef.current)return;
-    try{await directionCharRef.current.writeValue(new Uint8Array([1]));}catch(_){}
-  },[]);
+    if(!directionCharRef.current){toast('Not connected','error');return;}
+    try{
+      await directionCharRef.current.writeValue(new Uint8Array([1]));
+    }catch(e){
+      toast('Reverse command failed: '+e.message,'error');
+    }
+  },[toast]);
 
   const sc=isConnected?(mode==='local'?'#94a3b8':'#34d399'):demoMode?'#c084fc':'#475569';
   const sl=isConnected?deviceName:demoMode?'Demo mode':'Not connected';
@@ -358,15 +393,19 @@ function App(){
 
         // Horn / Direction
         h('div',{style:{display:'flex',gap:'10px'}},
-          h('button',{onClick:fireHorn,disabled:!isConnected,
+          h('button',{
+              onMouseDown:hornDown,onMouseUp:hornUp,onMouseLeave:hornUp,
+              onTouchStart:hornDown,onTouchEnd:hornUp,onTouchCancel:hornUp,
+              disabled:!isConnected,
               style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'6px',
                 padding:'16px',borderRadius:'14px',
-                border:'1px solid rgba(30,58,95,0.5)',
-                background:'rgba(13,17,23,0.7)',
+                border:hornPressed?'1px solid #fbbf24':'1px solid rgba(30,58,95,0.5)',
+                background:hornPressed?'rgba(251,191,36,0.15)':'rgba(13,17,23,0.7)',
                 color:isConnected?'#fbbf24':'#334155',
-                cursor:isConnected?'pointer':'not-allowed'}},
+                cursor:isConnected?'pointer':'not-allowed',
+                userSelect:'none',touchAction:'none'}},
             h(HornIcon,null),
-            h('span',{style:{fontSize:'12px',fontWeight:700,letterSpacing:'0.05em'}},'HORN')),
+            h('span',{style:{fontSize:'12px',fontWeight:700,letterSpacing:'0.05em'}},'HORN (hold)')),
           h('button',{onClick:fireDirection,disabled:!isConnected,
               style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'6px',
                 padding:'16px',borderRadius:'14px',
