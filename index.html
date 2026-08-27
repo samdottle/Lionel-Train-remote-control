@@ -1,8 +1,15 @@
 <!DOCTYPE html>
 <!--
   O27 Controller — Web App
-  Version: 1.2
-  Date:    2026-08-25
+  Version: 1.4
+  Date:    2026-08-26
+
+  New in v1.4:
+    - The throttle slider is now display-only while dragging.
+    - A single BLE throttle command is sent only when the slider is released.
+    - Horn and Reverse remain immediate controls.
+    - The shared BLE write queue is retained only as a transport safeguard
+      because Android/Chrome Web Bluetooth cannot overlap GATT operations.
 
   New in v1.1:
     - Horn button is now genuinely press-and-hold: it sends held=1 on
@@ -95,7 +102,6 @@ const HORN_UUID      ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, hold (no
 const DIRECTION_UUID ='0027aaa3-0001-4000-8000-00805f9b0027'; // write, momentary
 const STATUS_UUID    ='0027aaa4-0001-4000-8000-00805f9b0027'; // read+notify, JSON
 
-const THROTTLE_WRITE_THROTTLE_MS=80; // rate-limit BLE writes while dragging
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function clamp(v,a,b){return Math.min(Math.max(v,a),b)}
@@ -171,9 +177,13 @@ function App(){
   const devRef=useRef(null);
   const throttleCharRef=useRef(null),hornCharRef=useRef(null),directionCharRef=useRef(null);
 
+  // Transport safeguard only: Android/Chrome Web Bluetooth generally permits
+  // only one GATT operation at a time. The controls remain logically
+  // independent; this queue merely prevents overlapping radio transactions.
+  const gattQueueRef=useRef(Promise.resolve());
+
   const[throttle,setThrottle]=useState(0);   // last known/displayed throttle 0-100
   const[mode,setMode]=useState('remote');    // 'local' | 'remote', from firmware status
-  const lastWriteRef=useRef(0);
 
   const[demoMode,setDemoMode]=useState(false);
 
@@ -192,7 +202,9 @@ function App(){
   const onDisc=useCallback(()=>{
     setIsConnected(false);
     setHornPressed(false);
+    setReversePressed(false);
     throttleCharRef.current=null;hornCharRef.current=null;directionCharRef.current=null;
+    gattQueueRef.current=Promise.resolve();
     toast('Disconnected');
   },[toast]);
 
@@ -232,24 +244,47 @@ function App(){
   },[]);
 
   // ── Commands ─────────────────────────────────────────────────────────────
-  const writeThrottle=useCallback(async percent=>{
-    if(!throttleCharRef.current)return;
-    try{await throttleCharRef.current.writeValue(new Uint8Array([percent]));}catch(_){}
-  },[]);
+  const queueGattWrite=useCallback((characteristic,payload,label,silent=false)=>{
+    if(!characteristic){
+      if(!silent)toast('Not connected','error');
+      return Promise.resolve(false);
+    }
+
+    const operation=gattQueueRef.current
+      .catch(()=>{})
+      .then(async()=>{
+        if(!devRef.current?.gatt?.connected)throw new Error('Not connected');
+        await characteristic.writeValue(payload);
+      });
+
+    // Keep the internal queue alive even if one command fails.
+    gattQueueRef.current=operation.catch(()=>{});
+
+    return operation.then(()=>true).catch(e=>{
+      if(!silent)toast(label+' command failed: '+e.message,'error');
+      return false;
+    });
+  },[toast]);
+
+  const writeThrottle=useCallback(percent=>{
+    if(!throttleCharRef.current)return Promise.resolve(false);
+    return queueGattWrite(
+      throttleCharRef.current,
+      new Uint8Array([percent]),
+      'Throttle',
+      true
+    );
+  },[queueGattWrite]);
 
   const onSliderInput=useCallback(percent=>{
+    // While dragging, update only the local display/gauge.
+    // No BLE throttle traffic is generated here.
     setThrottle(percent);
-    if(!isConnected)return; // demo mode: visual only, nothing to write to
-    const now=Date.now();
-    if(now-lastWriteRef.current>=THROTTLE_WRITE_THROTTLE_MS){
-      lastWriteRef.current=now;
-      writeThrottle(percent);
-    }
-  },[isConnected,writeThrottle]);
+  },[]);
 
-  const onSliderCommit=useCallback(percent=>{
+  const onSliderRelease=useCallback(percent=>{
     setThrottle(percent);
-    if(isConnected){lastWriteRef.current=Date.now();writeThrottle(percent);}
+    if(isConnected)writeThrottle(percent); // exactly one speed write on release
   },[isConnected,writeThrottle]);
 
   const emergencyStop=useCallback(()=>{
@@ -259,30 +294,52 @@ function App(){
   },[isConnected,writeThrottle,toast]);
 
   const [hornPressed,setHornPressed]=useState(false);
+  const [reversePressed,setReversePressed]=useState(false);
 
   const sendHorn=useCallback(async held=>{
-    if(!hornCharRef.current){toast('Not connected','error');return;}
-    try{
-      await hornCharRef.current.writeValue(new Uint8Array([held?1:0]));
-    }catch(e){
-      toast('Horn command failed: '+e.message,'error');
-    }
-  },[toast]);
+    const characteristic=hornCharRef.current;
+    if(!characteristic){toast('Not connected','error');return false;}
+    return queueGattWrite(
+      characteristic,
+      new Uint8Array([held?1:0]),
+      'Horn'
+    );
+  },[queueGattWrite,toast]);
 
   // Press-and-hold: fires on press, releases on lift-off — covers both
-  // mouse and touch, and fires the "released" write even if the pointer
-  // drags off the button while held, so it can never get stuck on.
-  const hornDown=useCallback(e=>{e.preventDefault();setHornPressed(true);sendHorn(true);},[sendHorn]);
-  const hornUp=useCallback(e=>{e.preventDefault();setHornPressed(false);sendHorn(false);},[sendHorn]);
+  // mouse and touch. The shared GATT queue guarantees ON and OFF are sent
+  // in order instead of becoming overlapping Bluetooth operations.
+  const hornDown=useCallback(e=>{
+    e.preventDefault();
+    if(e.currentTarget.setPointerCapture){
+      try{e.currentTarget.setPointerCapture(e.pointerId);}catch(_){}
+    }
+    setHornPressed(true);
+    sendHorn(true);
+  },[sendHorn]);
+
+  const hornUp=useCallback(e=>{
+    e.preventDefault();
+    setHornPressed(false);
+    sendHorn(false);
+    if(e.currentTarget.releasePointerCapture){
+      try{e.currentTarget.releasePointerCapture(e.pointerId);}catch(_){}
+    }
+  },[sendHorn]);
 
   const fireDirection=useCallback(async()=>{
-    if(!directionCharRef.current){toast('Not connected','error');return;}
-    try{
-      await directionCharRef.current.writeValue(new Uint8Array([1]));
-    }catch(e){
-      toast('Reverse command failed: '+e.message,'error');
-    }
-  },[toast]);
+    const characteristic=directionCharRef.current;
+    if(!characteristic){toast('Not connected','error');return;}
+
+    // Immediate visual feedback confirms the tap was registered.
+    setReversePressed(true);
+    const ok=await queueGattWrite(
+      characteristic,
+      new Uint8Array([1]),
+      'Reverse'
+    );
+    window.setTimeout(()=>setReversePressed(false),ok?220:350);
+  },[queueGattWrite,toast]);
 
   const sc=isConnected?(mode==='local'?'#94a3b8':'#34d399'):demoMode?'#c084fc':'#475569';
   const sl=isConnected?deviceName:demoMode?'Demo mode':'Not connected';
@@ -302,7 +359,7 @@ function App(){
             h('h1',{style:{fontSize:'22px',fontWeight:300,color:'white',margin:0,lineHeight:1}},
               'O27 ',h('span',{style:{fontWeight:700,color:'#fbbf24'}},'Controller')),
             h('p',{style:{fontSize:'10px',color:'#475569',margin:'2px 0 0'}},
-              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.2 \u00B7 FW v1.8')
+              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.4 \u00B7 FW v1.8')
           ),
           h('div',{style:{display:'flex',alignItems:'center',gap:'5px',padding:'4px 10px',
               borderRadius:'20px',border:`1px solid ${sc}40`,background:`${sc}12`,
@@ -380,7 +437,8 @@ function App(){
           h('input',{type:'range',min:0,max:100,step:1,value:throttle,
               disabled:!controllable,
               onInput:e=>onSliderInput(parseInt(e.target.value,10)),
-              onChange:e=>onSliderCommit(parseInt(e.target.value,10)),
+              onPointerUp:e=>onSliderRelease(parseInt(e.currentTarget.value,10)),
+              onKeyUp:e=>onSliderRelease(parseInt(e.currentTarget.value,10)),
               style:{marginTop:'10px'}}),
           h('div',{style:{display:'flex',justifyContent:'space-between',
               fontSize:'10px',color:'#334155'}},
@@ -393,7 +451,7 @@ function App(){
         // Horn / Direction
         h('div',{style:{display:'flex',gap:'10px'}},
           h('button',{
-              onPointerDown:hornDown,onPointerUp:hornUp,onPointerLeave:hornUp,onPointerCancel:hornUp,
+              onPointerDown:hornDown,onPointerUp:hornUp,onPointerCancel:hornUp,
               disabled:!isConnected,
               style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'6px',
                 padding:'16px',borderRadius:'14px',
@@ -407,9 +465,11 @@ function App(){
           h('button',{onClick:fireDirection,disabled:!isConnected,
               style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'6px',
                 padding:'16px',borderRadius:'14px',
-                border:'1px solid rgba(30,58,95,0.5)',
-                background:'rgba(13,17,23,0.7)',
+                border:reversePressed?'1px solid #fbbf24':'1px solid rgba(30,58,95,0.5)',
+                background:reversePressed?'rgba(251,191,36,0.15)':'rgba(13,17,23,0.7)',
                 color:isConnected?'#fbbf24':'#334155',
+                transform:reversePressed?'scale(0.98)':'scale(1)',
+                transition:'background 100ms,border-color 100ms,transform 80ms',
                 cursor:isConnected?'pointer':'not-allowed'}},
             h(DirectionIcon,null),
             h('span',{style:{fontSize:'12px',fontWeight:700,letterSpacing:'0.05em'}},'REVERSE'))
@@ -430,7 +490,7 @@ function App(){
         // Footer
         h('div',{style:{textAlign:'center',fontSize:'11px',color:'#1e3a5f',paddingTop:'4px'}},
           h('p',{style:{margin:0}},'Arduino Nano ESP32 + AC1803000 \u00B7 BLE'),
-          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.2 \u00B7 FW v1.8')
+          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.4 \u00B7 FW v1.8')
         )
       )
     ),

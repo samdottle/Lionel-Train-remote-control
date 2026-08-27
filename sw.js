@@ -1,5 +1,5 @@
-// O27 Controller service worker — Version 1.2 — 2026-08-25
-const CACHE='o27-v1.2';
+// O27 Controller service worker — Version 1.4 — 2026-08-26
+const CACHE='o27-v1.4';
 const STATIC_ASSETS=['./manifest.json','./icon-192.png','./icon-512.png'];
 
 self.addEventListener('install',event=>{

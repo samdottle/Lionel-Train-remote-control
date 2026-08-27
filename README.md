@@ -1,6 +1,6 @@
 # O27 Controller — Web App
 
-**UI Version 1.2** · Matched firmware: **FW v1.8** · 2026-08-26 · AC1803000 · Arduino Nano ESP32 · BLE
+**UI Version 1.3** · Matched firmware: **FW v1.8** · 2026-08-26 · AC1803000 · Arduino Nano ESP32 · BLE
 
 The supported phone/Chrome OS client is the installable PWA in this folder.
 There is no build step: `index.html` contains the UI and BLE client.
