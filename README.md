@@ -1,29 +1,27 @@
-# O27 Controller — Web App
+# O27 Controller PWA — UI v1.5
 
-**UI Version 1.3** · Matched firmware: **FW v1.8** · 2026-08-26 · AC1803000 · Arduino Nano ESP32 · BLE
+Matched firmware: **FW v1.13**  
+Project release: **Proto V1.0**
 
-The supported phone/Chrome OS client is the installable PWA in this folder.
-There is no build step: `index.html` contains the UI and BLE client.
+The app is a single-file React-via-CDN Web Bluetooth PWA. There is no build
+step.
 
-## BLE API
+## UI v1.5
+- Entire 0–100 speed dial is visible.
+- Major labels: 0, 25, 50, 75, 100.
+- Slider display moves continuously while dragging.
+- One throttle BLE write is sent on slider release.
+- Horn is press-and-hold.
+- Reverse is a momentary tap with visible pressed feedback.
 
-Must match `firmware/o27_controller/include/config.h`:
+## BLE transport
+Throttle, Horn, and Reverse have independent characteristics and state. Their
+writes pass through one promise queue only because Android/Chrome Web Bluetooth
+does not allow overlapping GATT operations.
 
-| Characteristic | Properties | Payload |
-|---|---|---|
-| Throttle | Write | 1 binary byte, 0-100 |
-| Horn | Write | 1 binary byte: nonzero = held, 0 = released |
-| Direction | Write | any payload; each write requests one reverse pulse |
-| Status | Read + Notify | JSON `{"throttle":0-100,"mode":"local"|"remote"}` |
+## PWA updates
+Service-worker cache: `o27-v1.5`. Navigation is network-first to reduce stale
+GitHub Pages installs after deployment.
 
-## PWA update behavior
-
-v1.2 uses network-first navigation and registers the service worker with
-`updateViaCache: 'none'`. This fixes the earlier failure mode where an installed
-PWA could continue displaying an old GitHub Pages copy after deployment.
-
-## Browser support
-
-Use Chrome or Edge with Web Bluetooth support (Android, Chrome OS, or desktop).
-Safari/iOS does not provide the required Web Bluetooth API; Firefox does not
-enable it by default.
+## Browser
+Use a Web Bluetooth-capable Chromium browser.

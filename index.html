@@ -1,66 +1,19 @@
 <!DOCTYPE html>
 <!--
   O27 Controller — Web App
-  Version: 1.4
-  Date:    2026-08-26
+  UI Version: 1.5
+  Matched Firmware: FW v1.13
+  Proto Release: V1.0
+  Date: 2026-09-04
 
-  New in v1.4:
-    - The throttle slider is now display-only while dragging.
-    - A single BLE throttle command is sent only when the slider is released.
-    - Horn and Reverse remain immediate controls.
-    - The shared BLE write queue is retained only as a transport safeguard
-      because Android/Chrome Web Bluetooth cannot overlap GATT operations.
-
-  New in v1.1:
-    - Horn button is now genuinely press-and-hold: it sends held=1 on
-      press and held=0 on release (mouse and touch, including release on
-      drag-off so it can never get stuck showing "pressed"), matching a
-      firmware change (v1.6) where the real AC1803000 whistle sounds for
-      as long as its button is held, not a fixed blip — Reverse stays a
-      single momentary tap, since that one really is one-shot on the real
-      hardware.
-    - Horn and Reverse BLE write failures now show an error toast instead
-      of failing silently (previously an empty catch block) — added while
-      diagnosing a "buttons don't seem to do anything" report, so the
-      next attempt actually shows whether the write itself is failing.
-      Throttle's write path deliberately still fails silently — it writes
-      every ~80ms while dragging, so a toast there would spam during
-      normal use; if throttle writes need the same treatment later, that
-      needs a debounced/rate-limited error toast, not this same pattern.
-
-  New in v1.0 (initial version):
-    - First pass at a UI while the bench hardware (Nano ESP32 + 28BYJ-48 +
-      relays + local pot) is still being wired up. Built against the BLE
-      service defined in firmware/o27_controller/include/config.h:
-      Throttle (write, 1 byte 0-100), Horn (write, momentary), Direction
-      (write, momentary), Status (read+notify, JSON {throttle, mode}).
-    - Same code family/conventions as Digital Level 1 RV: single-file
-      React-via-CDN app (no build step), Tailwind CDN for utility classes,
-      dark navy theme, toast notifications, installable PWA (manifest +
-      service worker).
-    - Local/Remote handling: the slider and Emergency Stop are both
-      disabled whenever the firmware reports mode:"local" — the physical
-      panel pot is in charge at that point and app input would just be
-      ignored by the firmware, so the UI says so instead of pretending
-      otherwise.
-    - Throttle writes are lightly rate-limited while dragging (one write
-      per ~80ms) rather than firing on every pointer-move event, plus a
-      guaranteed final write on release so the last position is always
-      sent even if the drag ends between throttled writes.
-    - Demo toggle lets the slider/gauge be exercised with no hardware
-      connected, for UI work on the bench before BLE is live. Disabled
-      once actually connected, same pattern as Digital Level 1 RV's demo
-      modes.
-    - Horn/Direction button glyphs echo the AC1803000's own front-panel
-      icons (radiating-arc horn icon, ◄▮► direction icon) rather than
-      generic ones, so the app reads as a remote for *this* controller.
-
-  Not yet done:
-    - Not calibrated against real hardware yet (no device to connect to
-      while this was written) — UUIDs match config.h but haven't been
-      exercised against a live Nano ESP32.
-    - No reconnect-on-drop handling beyond what the browser gives for
-      free; may want a retry affordance once this sees real bench use.
+  UI v1.5:
+    - Speed dial viewport is expanded so the complete 0–100 face is visible.
+    - Explicit 0 / 25 / 50 / 75 / 100 dial markings are shown.
+    - Throttle behavior is unchanged: gauge updates while dragging,
+      and one BLE throttle command is sent only when the slider is released.
+    - Horn and Reverse remain independent immediate controls.
+    - BLE writes remain serialized only at the Web Bluetooth transport layer
+      to prevent "GATT operation already in progress" errors.
 -->
 <html lang="en">
 <head>
@@ -121,33 +74,58 @@ function useToast(){
 // Echoes the AC1803000's own OFF -> FULL SPEED dial face: a ~270deg sweep
 // with tick marks and a needle, rather than a generic progress ring.
 function SpeedDial({percent,active}){
-  const R=120;
-  const startDeg=135,endDeg=405; // 270deg sweep, matches the icon + real dial
+  // Full 270-degree AC1803000-style face. The SVG viewport intentionally
+  // includes the bottom endpoints so 0 and 100 can never be clipped.
+  const R=118;
+  const startDeg=135,endDeg=405;
   const toRad=d=>d*Math.PI/180;
   const needleDeg=startDeg+(endDeg-startDeg)*(percent/100);
   const na=toRad(needleDeg);
-  const needleR=R*0.72;
+  const needleR=R*0.68;
   const nx=needleR*Math.cos(na),ny=needleR*Math.sin(na);
   const ticks=[];
-  for(let i=0;i<=8;i++){
-    const a=toRad(startDeg+(endDeg-startDeg)*i/8);
-    const r1=R*0.82,r2=R*0.98;
-    ticks.push(h('line',{key:i,
+  for(let pct=0;pct<=100;pct+=5){
+    const a=toRad(startDeg+(endDeg-startDeg)*(pct/100));
+    const major=(pct%25===0);
+    const r1=R*(major?0.76:0.83),r2=R*0.96;
+    ticks.push(h('line',{key:`tick-${pct}`,
       x1:r1*Math.cos(a),y1:r1*Math.sin(a),x2:r2*Math.cos(a),y2:r2*Math.sin(a),
-      stroke:'rgba(255,255,255,0.25)',strokeWidth:2}));
+      stroke:major?'rgba(148,163,184,0.65)':'rgba(255,255,255,0.18)',
+      strokeWidth:major?2.5:1.2,strokeLinecap:'round'}));
   }
+
+  const labels=[0,25,50,75,100].map(pct=>{
+    const a=toRad(startDeg+(endDeg-startDeg)*(pct/100));
+    const lr=R*1.08;
+    return h('text',{key:`label-${pct}`,
+      x:lr*Math.cos(a),y:lr*Math.sin(a)+4,
+      textAnchor:'middle',fill:(pct===0||pct===100)?'#94a3b8':'#64748b',
+      fontSize:(pct===0||pct===100)?13:11,fontWeight:700},String(pct));
+  });
+
+  const arcR=R*0.90;
+  const sx=arcR*Math.cos(toRad(startDeg)),sy=arcR*Math.sin(toRad(startDeg));
+  const ex=arcR*Math.cos(toRad(endDeg)),ey=arcR*Math.sin(toRad(endDeg));
   const needleCol=active?'#fbbf24':'#475569';
+
   return h('div',{style:{display:'flex',justifyContent:'center'}},
-    h('svg',{width:R*2,height:R*1.5,viewBox:`${-R} ${-R} ${R*2} ${R*1.15}`},
+    h('svg',{
+        width:'100%',height:280,viewBox:'-140 -140 280 280',
+        style:{maxWidth:'300px',display:'block',overflow:'visible'}},
       h('path',{
-          d:`M ${R*0.85*Math.cos(toRad(startDeg))} ${R*0.85*Math.sin(toRad(startDeg))} A ${R*0.85} ${R*0.85} 0 1 1 ${R*0.85*Math.cos(toRad(endDeg))} ${R*0.85*Math.sin(toRad(endDeg))}`,
-          fill:'none',stroke:'rgba(255,255,255,0.12)',strokeWidth:3}),
+          d:`M ${sx} ${sy} A ${arcR} ${arcR} 0 1 1 ${ex} ${ey}`,
+          fill:'none',stroke:'rgba(255,255,255,0.12)',strokeWidth:3,
+          strokeLinecap:'round'}),
       ...ticks,
-      h('line',{x1:0,y1:0,x2:nx,y2:ny,stroke:needleCol,strokeWidth:5,strokeLinecap:'round',
-          style:{transition:'all 0.15s ease-out'}}),
-      h('circle',{cx:0,cy:0,r:8,fill:needleCol,style:{transition:'fill 0.15s ease-out'}}),
-      h('text',{x:-R*0.78,y:R*0.05,fill:'#334155',fontSize:11,fontWeight:700},'OFF'),
-      h('text',{x:R*0.55,y:R*0.05,fill:'#334155',fontSize:11,fontWeight:700},'FULL')
+      ...labels,
+      h('line',{x1:0,y1:0,x2:nx,y2:ny,stroke:needleCol,strokeWidth:5,
+          strokeLinecap:'round',style:{transition:'all 0.15s ease-out'}}),
+      h('circle',{cx:0,cy:0,r:8,fill:needleCol,
+          style:{transition:'fill 0.15s ease-out'}}),
+      h('text',{x:-102,y:126,textAnchor:'middle',fill:'#475569',
+          fontSize:10,fontWeight:700},'OFF'),
+      h('text',{x:102,y:126,textAnchor:'middle',fill:'#475569',
+          fontSize:10,fontWeight:700},'FULL SPEED')
     ));
 }
 
@@ -359,7 +337,7 @@ function App(){
             h('h1',{style:{fontSize:'22px',fontWeight:300,color:'white',margin:0,lineHeight:1}},
               'O27 ',h('span',{style:{fontWeight:700,color:'#fbbf24'}},'Controller')),
             h('p',{style:{fontSize:'10px',color:'#475569',margin:'2px 0 0'}},
-              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.4 \u00B7 FW v1.8')
+              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.5 \u00B7 FW v1.13')
           ),
           h('div',{style:{display:'flex',alignItems:'center',gap:'5px',padding:'4px 10px',
               borderRadius:'20px',border:`1px solid ${sc}40`,background:`${sc}12`,
@@ -490,7 +468,7 @@ function App(){
         // Footer
         h('div',{style:{textAlign:'center',fontSize:'11px',color:'#1e3a5f',paddingTop:'4px'}},
           h('p',{style:{margin:0}},'Arduino Nano ESP32 + AC1803000 \u00B7 BLE'),
-          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.4 \u00B7 FW v1.8')
+          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.5 \u00B7 FW v1.13')
         )
       )
     ),
