@@ -1,0 +1,5 @@
+Lionel O27 Controller
+Project release: Proto V1.0
+UI: v1.5
+Firmware: FW v1.13
+Date: 2026-09-04
