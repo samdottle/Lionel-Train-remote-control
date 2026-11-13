@@ -2,6 +2,7 @@
 
 **Current matched release: UI v1.5 · FW v1.13**
 
+UI v1.7 / FW v1.16 is untested on hardware.
 
 <!-- PROTO-HERO-START -->
 <p align="center">
