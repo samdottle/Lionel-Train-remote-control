@@ -1,12 +1,33 @@
 <!DOCTYPE html>
 <!--
   O27 Controller — Web App
-  UI Version: 1.6 SG DRAFT
-  Matched Firmware: FW v1.15 SG DRAFT (UI v1.5 behavior is retained; with
-                    FW v1.13 the calibration controls stay disabled)
+  UI Version: 1.7 SG DRAFT
+  Matched Firmware: FW v1.16 SG DRAFT (with FW v1.15 only HOME calibration
+                    works; with FW v1.13 the calibration controls stay disabled)
   Proto Release: V1.0 + calibration characteristic
-  Date: 2026-11-12  (Nov 12 2026)
-  Status: DRAFT - not bench-tested. Not approved, not final.
+  Date: 2026-11-13  (Nov 13 2026)
+  Status: DRAFT - UNTESTED on hardware. Not approved, not final. Provenance SG.
+
+  UI v1.7 (vs v1.6):
+    - Calibration card now has a target selector HOME / START / MAX, with a
+      short hint for each, and shows all three values in microseconds from the
+      status JSON ("home", "start", "max", "calTarget"). While calibrating the
+      selected target's value is the working (unsaved) one.
+        HOME  = 0% park position, zero track volts
+        START = 1% position, where the engine just begins to move (~4 VAC)
+        MAX   = 100% position; nudge up until track reads ~15 VAC (capped 2500 us)
+    - Enter / -50 -10 -1 +1 +10 +50 / Save / Reset / Cancel act on the selected
+      target. Selecting a target while calibrating sends BLE cal command
+      0x06 <target 0|1|2>; Enter always starts on HOME (firmware), and if
+      START or MAX was picked before Enter the app sends 0x06 right after it.
+      Save saves only the selected target; selecting another target discards
+      an unsaved edit of the previous one.
+    - If the controller is FW v1.15 (status has no "start"/"max"), START and
+      MAX are disabled with the note "START/MAX need FW v1.16"; HOME still works.
+    - Unchanged: grey-out when there is no calibration characteristic
+      (FW v1.13); throttle slider and Emergency Stop disabled while calibrating.
+    - index.html does not contain a cache name. When publishing, the
+      repo's sw.js needs its cache name bumped (o27-v1.7).
 
   UI v1.6 (vs v1.5):
     - New "Home Calibration" card: Enter Calibration, -10, -1, +1, +10,
@@ -40,7 +61,7 @@
 <meta name="apple-mobile-web-app-title" content="O27 Controller">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
-<title>O27 Controller UI v1.6 SG DRAFT</title>
+<title>O27 Controller UI v1.7 SG DRAFT</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <style>
@@ -70,7 +91,12 @@ const HORN_UUID      ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, hold (no
 const DIRECTION_UUID ='0027aaa3-0001-4000-8000-00805f9b0027'; // write, momentary
 const STATUS_UUID    ='0027aaa4-0001-4000-8000-00805f9b0027'; // read+notify, JSON
 const CAL_UUID       ='0027aaa5-0001-4000-8000-00805f9b0027'; // write, calibration cmd (FW v1.15)
-const CAL_ENTER=1,CAL_CANCEL=2,CAL_SAVE=3,CAL_RESET=4,CAL_NUDGE=5;
+const CAL_ENTER=1,CAL_CANCEL=2,CAL_SAVE=3,CAL_RESET=4,CAL_NUDGE=5,CAL_SELECT=6; // SELECT: FW v1.16
+const CAL_TARGETS=[
+  {id:0,name:'HOME', key:'home', def:1000,hint:'HOME: 0% park position, zero track volts.'},
+  {id:1,name:'START',key:'start',def:1876,hint:'START: 1% position, where the train just begins to move (about 4 VAC).'},
+  {id:2,name:'MAX',  key:'max',  def:2200,hint:'MAX: track voltage at 100%. Nudge up until the track reads about 15 VAC (target). Capped at 2500 \u00B5s; stop before any binding or stall.'}
+];
 
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -175,7 +201,12 @@ function App(){
   const[calAvailable,setCalAvailable]=useState(false); // firmware has the cal characteristic
   const[calActive,setCalActive]=useState(false);       // firmware reports calibration mode
   const[homeUs,setHomeUs]=useState(null);              // working HOME while calibrating, else saved HOME
+  const[startUs,setStartUs]=useState(null);            // START (FW v1.16+), null on older firmware
+  const[maxUs,setMaxUs]=useState(null);                // MAX (FW v1.16+), null on older firmware
+  const[fwTarget,setFwTarget]=useState(0);             // calTarget reported by firmware
+  const[pendingTarget,setPendingTarget]=useState(0);   // target picked in the UI (used for Enter)
   const savePendingRef=useRef(null);                   // timer id while waiting for Save confirmation
+  const savedTargetRef=useRef(0);                      // target being saved (for the confirmation toast)
 
   // Transport safeguard only: Android/Chrome Web Bluetooth generally permits
   // only one GATT operation at a time. The controls remain logically
@@ -201,16 +232,24 @@ function App(){
         setCalActive(active);
         if(!active&&savePendingRef.current){
           clearTimeout(savePendingRef.current);savePendingRef.current=null;
-          toast('Home saved: '+data.home+' \u00B5s','success');
+          const t=CAL_TARGETS[savedTargetRef.current]||CAL_TARGETS[0];
+          toast(t.name+' saved: '+data[t.key]+' \u00B5s','success');
+        }
+        if(active&&typeof data.calTarget==='number'&&data.calTarget>=0&&data.calTarget<=2){
+          setFwTarget(data.calTarget);setPendingTarget(data.calTarget);
         }
       }
       if(typeof data.home==='number')setHomeUs(data.home);
+      // FW v1.16+ only; stays null on FW v1.15 so START/MAX can be disabled.
+      if(typeof data.start==='number')setStartUs(data.start);
+      if(typeof data.max==='number')setMaxUs(data.max);
     }catch(_){/* malformed packet, skip */}
   },[toast]);
 
   const onDisc=useCallback(()=>{
     setIsConnected(false);
     setCalAvailable(false);setCalActive(false);setHomeUs(null);
+    setStartUs(null);setMaxUs(null);setFwTarget(0);setPendingTarget(0);
     if(savePendingRef.current){clearTimeout(savePendingRef.current);savePendingRef.current=null;}
     calCharRef.current=null;
     setHornPressed(false);
@@ -289,7 +328,16 @@ function App(){
     return queueGattWrite(calCharRef.current,payload,label||'Calibration',false);
   },[queueGattWrite]);
 
-  const calEnter=useCallback(()=>sendCal(CAL_ENTER,undefined,'Enter calibration'),[sendCal]);
+  // Enter always starts on HOME in the firmware; if another target was picked
+  // first, select it right after (commands are applied in order).
+  const calEnter=useCallback(async()=>{
+    const ok=await sendCal(CAL_ENTER,undefined,'Enter calibration');
+    if(ok&&pendingTarget!==0)await sendCal(CAL_SELECT,pendingTarget,'Select target');
+  },[sendCal,pendingTarget]);
+  const calSelect=useCallback(t=>{
+    setPendingTarget(t);
+    if(calActive)sendCal(CAL_SELECT,t,'Select target');
+  },[sendCal,calActive]);
   const calNudge=useCallback(d=>sendCal(CAL_NUDGE,d,'Nudge'),[sendCal]);
   const calCancel=useCallback(()=>sendCal(CAL_CANCEL,undefined,'Cancel'),[sendCal]);
   const calReset=useCallback(()=>sendCal(CAL_RESET,undefined,'Reset default'),[sendCal]);
@@ -301,9 +349,10 @@ function App(){
       savePendingRef.current=null;
       toast('Save not confirmed - check the controller','error');
     },4000);
-    const ok=await sendCal(CAL_SAVE,undefined,'Save home');
+    savedTargetRef.current=pendingTarget;
+    const ok=await sendCal(CAL_SAVE,undefined,'Save');
     if(!ok&&savePendingRef.current){clearTimeout(savePendingRef.current);savePendingRef.current=null;}
-  },[sendCal,toast]);
+  },[sendCal,toast,pendingTarget]);
 
   const writeThrottle=useCallback(percent=>{
     if(!throttleCharRef.current)return Promise.resolve(false);
@@ -398,7 +447,7 @@ function App(){
             h('h1',{style:{fontSize:'22px',fontWeight:300,color:'white',margin:0,lineHeight:1}},
               'O27 ',h('span',{style:{fontWeight:700,color:'#fbbf24'}},'Controller')),
             h('p',{style:{fontSize:'10px',color:'#475569',margin:'2px 0 0'}},
-              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.6 SG DRAFT \u00B7 FW v1.15 SG DRAFT')
+              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.7 SG DRAFT \u00B7 FW v1.16 SG DRAFT')
           ),
           h('div',{style:{display:'flex',alignItems:'center',gap:'5px',padding:'4px 10px',
               borderRadius:'20px',border:`1px solid ${sc}40`,background:`${sc}12`,
@@ -487,9 +536,13 @@ function App(){
             'Connect (or start Demo) to control throttle')
         ),
 
-        // Home calibration (UI v1.6)
+        // Calibration (UI v1.7): HOME / START / MAX
         (()=>{
           const calOk=isConnected&&calAvailable;           // controls usable at all
+          const hasV116=startUs!==null&&maxUs!==null;      // firmware reports START/MAX
+          const sel=pendingTarget;                          // selected target 0/1/2 (synced from firmware calTarget)
+          const selT=CAL_TARGETS[sel]||CAL_TARGETS[0];
+          const vals=[homeUs,startUs,maxUs];
           const btn=(label,onClick,enabled,color)=>h('button',{onClick,disabled:!enabled,
             style:{flex:1,padding:'10px 4px',borderRadius:'10px',
               border:`1px solid ${enabled?(color||'rgba(251,191,36,0.5)'):'#1e293b'}`,
@@ -497,38 +550,61 @@ function App(){
               color:enabled?(color||'#fbbf24'):'#334155',
               fontSize:'13px',fontWeight:700,
               cursor:enabled?'pointer':'not-allowed'}},label);
+          const tgtBtn=t=>{
+            const enabled=calOk&&(t.id===0||hasV116);
+            const on=(sel===t.id);
+            return h('button',{key:t.name,onClick:()=>calSelect(t.id),disabled:!enabled,
+              style:{flex:1,padding:'8px 2px',borderRadius:'10px',
+                border:`1px solid ${on&&enabled?'#fbbf24':(enabled?'rgba(251,191,36,0.35)':'#1e293b')}`,
+                background:on&&enabled?'rgba(251,191,36,0.22)':'rgba(15,25,41,0.6)',
+                color:enabled?(on?'#fbbf24':'#94a3b8'):'#334155',
+                cursor:enabled?'pointer':'not-allowed',lineHeight:1.2}},
+              h('div',{style:{fontSize:'12px',fontWeight:700}},t.name),
+              h('div',{style:{fontSize:'12px',fontFamily:'monospace',marginTop:'2px'}},
+                (calOk&&vals[t.id]!==null)?String(vals[t.id]):'---'));
+          };
+          const nudgeOk=calOk&&calActive;
           return h('div',{style:{background:'rgba(13,17,23,0.7)',borderRadius:'16px',
               border:calActive?'1px solid rgba(251,191,36,0.6)':'1px solid rgba(30,58,95,0.5)',
               padding:'14px'}},
-            h('p',{style:{fontSize:'13px',fontWeight:700,color:'white',margin:'0 0 4px'}},'Home Calibration'),
+            h('p',{style:{fontSize:'13px',fontWeight:700,color:'white',margin:'0 0 4px'}},'Calibration \u2014 HOME / START / MAX'),
             h('p',{style:{fontSize:'11px',color:'#64748b',margin:'0 0 10px',lineHeight:1.4}},
-              'Set the 0% (HOME) servo position so the train just starts to creep. '+
-              'Turn the native knob control fully to its OFF/start end, press Enter, '+
-              'nudge up until the train just creeps, back off slightly, then press Save Home.'),
+              'Pick a target, press Enter, nudge, then Save. Save stores only the selected target. '+
+              'Do HOME first, then START, then MAX.'),
+            h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
+              CAL_TARGETS.map(tgtBtn)),
+            (calOk&&!hasV116)&&h('p',{style:{fontSize:'10px',color:'#f87171',textAlign:'center',margin:'0 0 6px'}},
+              'START/MAX need FW v1.16'),
+            h('p',{style:{fontSize:'11px',color:'#94a3b8',margin:'0 0 8px',lineHeight:1.4}},selT.hint),
             h('div',{style:{textAlign:'center',margin:'4px 0 10px'}},
               h('span',{style:{fontSize:'28px',fontFamily:'monospace',fontWeight:700,
                   color:calOk?'#fbbf24':'#475569'}},
-                (calOk&&homeUs!==null)?String(homeUs):'---'),
+                (calOk&&vals[sel]!==null)?String(vals[sel]):'---'),
               h('span',{style:{fontSize:'13px',color:'#64748b',marginLeft:'6px'}},'\u00B5s'),
               h('div',{style:{fontSize:'10px',color:'#64748b',marginTop:'2px'}},
-                !calOk?(isConnected?'Calibration needs FW v1.15':'Connect to calibrate')
-                  :calActive?'CALIBRATING \u2014 working value, not saved yet'
-                  :'Saved HOME')),
+                !calOk?(isConnected?'Calibration needs FW v1.15 or newer':'Connect to calibrate')
+                  :calActive?'CALIBRATING '+selT.name+' \u2014 working value, not saved yet'
+                  :'Saved '+selT.name)),
             calActive&&h('p',{style:{fontSize:'11px',fontWeight:600,color:'#fbbf24',
                 textAlign:'center',margin:'0 0 8px'}},
               'Throttle controls are disabled while calibrating'),
+            (calActive&&sel===2)&&h('p',{style:{fontSize:'10px',fontWeight:600,color:'#f87171',
+                textAlign:'center',margin:'0 0 8px',lineHeight:1.4}},
+              'Never drive MAX past the knob hard stop. Watch the linkage; stop if it binds or stalls.'),
             h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
-              btn('Enter Calibration',calEnter,calOk&&!calActive,'#34d399')),
+              btn('Enter Calibration ('+selT.name+')',calEnter,calOk&&!calActive&&(sel===0||hasV116),'#34d399')),
             h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
-              btn('\u221210',()=>calNudge(-10),calOk&&calActive),
-              btn('\u22121',()=>calNudge(-1),calOk&&calActive),
-              btn('+1',()=>calNudge(1),calOk&&calActive),
-              btn('+10',()=>calNudge(10),calOk&&calActive)),
+              btn('\u221250',()=>calNudge(-50),nudgeOk),
+              btn('\u221210',()=>calNudge(-10),nudgeOk),
+              btn('\u22121',()=>calNudge(-1),nudgeOk),
+              btn('+1',()=>calNudge(1),nudgeOk),
+              btn('+10',()=>calNudge(10),nudgeOk),
+              btn('+50',()=>calNudge(50),nudgeOk)),
             h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
-              btn('Save Home',calSave,calOk&&calActive,'#34d399'),
-              btn('Cancel',calCancel,calOk&&calActive,'#94a3b8')),
+              btn('Save '+selT.name,calSave,nudgeOk,'#34d399'),
+              btn('Cancel',calCancel,nudgeOk,'#94a3b8')),
             h('div',{style:{display:'flex',gap:'6px'}},
-              btn('Reset Default (1000 \u00B5s)',calReset,calOk&&calActive,'#f87171'))
+              btn('Reset '+selT.name+' Default ('+selT.def+' \u00B5s)',calReset,nudgeOk,'#f87171'))
           );
         })(),
 
@@ -574,7 +650,7 @@ function App(){
         // Footer
         h('div',{style:{textAlign:'center',fontSize:'11px',color:'#1e3a5f',paddingTop:'4px'}},
           h('p',{style:{margin:0}},'Arduino Nano ESP32 + AC1803000 \u00B7 BLE'),
-          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.6 SG DRAFT \u00B7 FW v1.15 SG DRAFT')
+          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.7 SG DRAFT \u00B7 FW v1.16 SG DRAFT')
         )
       )
     ),
