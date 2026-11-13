@@ -1,10 +1,25 @@
 <!DOCTYPE html>
 <!--
   O27 Controller — Web App
-  UI Version: 1.5
-  Matched Firmware: FW v1.13
-  Proto Release: V1.0
-  Date: 2026-09-04
+  UI Version: 1.6 SG DRAFT
+  Matched Firmware: FW v1.15 SG DRAFT (UI v1.5 behavior is retained; with
+                    FW v1.13 the calibration controls stay disabled)
+  Proto Release: V1.0 + calibration characteristic
+  Date: 2026-11-12  (Nov 12 2026)
+  Status: DRAFT - not bench-tested. Not approved, not final.
+
+  UI v1.6 (vs v1.5):
+    - New "Home Calibration" card: Enter Calibration, -10, -1, +1, +10,
+      Save Home, Cancel, Reset Default, and a live display of the HOME pulse
+      width in microseconds. Controls are disabled unless connected to a
+      controller that has the calibration characteristic (FW v1.15).
+    - New BLE characteristic 0027aaa5-... (write): calibration commands.
+        0x01 enter, 0x02 cancel, 0x03 save, 0x04 reset default,
+        0x05 <int8> nudge by that many microseconds.
+    - Status JSON now also read for "cal" (0/1) and "home" (us).
+    - While calibration is active the throttle slider and Emergency Stop are
+      disabled (firmware ignores throttle); use Cancel to leave.
+    - Everything else is unchanged from v1.5.
 
   UI v1.5:
     - Speed dial viewport is expanded so the complete 0–100 face is visible.
@@ -25,7 +40,7 @@
 <meta name="apple-mobile-web-app-title" content="O27 Controller">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
-<title>O27 Controller</title>
+<title>O27 Controller UI v1.6 SG DRAFT</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <style>
@@ -54,6 +69,8 @@ const THROTTLE_UUID  ='0027aaa1-0001-4000-8000-00805f9b0027'; // write, 1 byte 0
 const HORN_UUID      ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, hold (nonzero=held, 0=released)
 const DIRECTION_UUID ='0027aaa3-0001-4000-8000-00805f9b0027'; // write, momentary
 const STATUS_UUID    ='0027aaa4-0001-4000-8000-00805f9b0027'; // read+notify, JSON
+const CAL_UUID       ='0027aaa5-0001-4000-8000-00805f9b0027'; // write, calibration cmd (FW v1.15)
+const CAL_ENTER=1,CAL_CANCEL=2,CAL_SAVE=3,CAL_RESET=4,CAL_NUDGE=5;
 
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -154,6 +171,11 @@ function App(){
   const[deviceName,setDeviceName]=useState('');
   const devRef=useRef(null);
   const throttleCharRef=useRef(null),hornCharRef=useRef(null),directionCharRef=useRef(null);
+  const calCharRef=useRef(null);
+  const[calAvailable,setCalAvailable]=useState(false); // firmware has the cal characteristic
+  const[calActive,setCalActive]=useState(false);       // firmware reports calibration mode
+  const[homeUs,setHomeUs]=useState(null);              // working HOME while calibrating, else saved HOME
+  const savePendingRef=useRef(null);                   // timer id while waiting for Save confirmation
 
   // Transport safeguard only: Android/Chrome Web Bluetooth generally permits
   // only one GATT operation at a time. The controls remain logically
@@ -165,7 +187,7 @@ function App(){
 
   const[demoMode,setDemoMode]=useState(false);
 
-  const controllable=demoMode||(isConnected&&mode==='remote');
+  const controllable=demoMode||(isConnected&&mode==='remote'&&!calActive);
 
   // ── BLE status notifications ──────────────────────────────────────────────
   const onStatus=useCallback(e=>{
@@ -174,11 +196,23 @@ function App(){
       const data=JSON.parse(text);
       if(typeof data.throttle==='number')setThrottle(clamp(data.throttle,0,100));
       if(data.mode==='local'||data.mode==='remote')setMode(data.mode);
+      if(typeof data.cal==='number'){
+        const active=data.cal===1;
+        setCalActive(active);
+        if(!active&&savePendingRef.current){
+          clearTimeout(savePendingRef.current);savePendingRef.current=null;
+          toast('Home saved: '+data.home+' \u00B5s','success');
+        }
+      }
+      if(typeof data.home==='number')setHomeUs(data.home);
     }catch(_){/* malformed packet, skip */}
-  },[]);
+  },[toast]);
 
   const onDisc=useCallback(()=>{
     setIsConnected(false);
+    setCalAvailable(false);setCalActive(false);setHomeUs(null);
+    if(savePendingRef.current){clearTimeout(savePendingRef.current);savePendingRef.current=null;}
+    calCharRef.current=null;
     setHornPressed(false);
     setReversePressed(false);
     throttleCharRef.current=null;hornCharRef.current=null;directionCharRef.current=null;
@@ -202,6 +236,11 @@ function App(){
       throttleCharRef.current=await svc.getCharacteristic(THROTTLE_UUID);
       hornCharRef.current=await svc.getCharacteristic(HORN_UUID);
       directionCharRef.current=await svc.getCharacteristic(DIRECTION_UUID);
+      // Calibration characteristic exists only on FW v1.15+; optional.
+      try{
+        calCharRef.current=await svc.getCharacteristic(CAL_UUID);
+        setCalAvailable(true);
+      }catch(_){calCharRef.current=null;setCalAvailable(false);}
       try{
         const status=await svc.getCharacteristic(STATUS_UUID);
         await status.startNotifications();
@@ -243,6 +282,28 @@ function App(){
       return false;
     });
   },[toast]);
+
+  // Calibration command: byte 0 = command, optional byte 1 = signed int8 arg.
+  const sendCal=useCallback((cmd,arg,label)=>{
+    const payload=(arg===undefined)?new Uint8Array([cmd]):new Int8Array([cmd,arg]);
+    return queueGattWrite(calCharRef.current,payload,label||'Calibration',false);
+  },[queueGattWrite]);
+
+  const calEnter=useCallback(()=>sendCal(CAL_ENTER,undefined,'Enter calibration'),[sendCal]);
+  const calNudge=useCallback(d=>sendCal(CAL_NUDGE,d,'Nudge'),[sendCal]);
+  const calCancel=useCallback(()=>sendCal(CAL_CANCEL,undefined,'Cancel'),[sendCal]);
+  const calReset=useCallback(()=>sendCal(CAL_RESET,undefined,'Reset default'),[sendCal]);
+  const calSave=useCallback(async()=>{
+    if(savePendingRef.current)clearTimeout(savePendingRef.current);
+    // The firmware leaves calibration mode only if the save succeeded; the
+    // next status packet (cal=0) confirms it.
+    savePendingRef.current=setTimeout(()=>{
+      savePendingRef.current=null;
+      toast('Save not confirmed - check the controller','error');
+    },4000);
+    const ok=await sendCal(CAL_SAVE,undefined,'Save home');
+    if(!ok&&savePendingRef.current){clearTimeout(savePendingRef.current);savePendingRef.current=null;}
+  },[sendCal,toast]);
 
   const writeThrottle=useCallback(percent=>{
     if(!throttleCharRef.current)return Promise.resolve(false);
@@ -337,7 +398,7 @@ function App(){
             h('h1',{style:{fontSize:'22px',fontWeight:300,color:'white',margin:0,lineHeight:1}},
               'O27 ',h('span',{style:{fontWeight:700,color:'#fbbf24'}},'Controller')),
             h('p',{style:{fontSize:'10px',color:'#475569',margin:'2px 0 0'}},
-              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.5 \u00B7 FW v1.13')
+              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.6 SG DRAFT \u00B7 FW v1.15 SG DRAFT')
           ),
           h('div',{style:{display:'flex',alignItems:'center',gap:'5px',padding:'4px 10px',
               borderRadius:'20px',border:`1px solid ${sc}40`,background:`${sc}12`,
@@ -426,6 +487,51 @@ function App(){
             'Connect (or start Demo) to control throttle')
         ),
 
+        // Home calibration (UI v1.6)
+        (()=>{
+          const calOk=isConnected&&calAvailable;           // controls usable at all
+          const btn=(label,onClick,enabled,color)=>h('button',{onClick,disabled:!enabled,
+            style:{flex:1,padding:'10px 4px',borderRadius:'10px',
+              border:`1px solid ${enabled?(color||'rgba(251,191,36,0.5)'):'#1e293b'}`,
+              background:enabled?'rgba(251,191,36,0.10)':'rgba(15,25,41,0.6)',
+              color:enabled?(color||'#fbbf24'):'#334155',
+              fontSize:'13px',fontWeight:700,
+              cursor:enabled?'pointer':'not-allowed'}},label);
+          return h('div',{style:{background:'rgba(13,17,23,0.7)',borderRadius:'16px',
+              border:calActive?'1px solid rgba(251,191,36,0.6)':'1px solid rgba(30,58,95,0.5)',
+              padding:'14px'}},
+            h('p',{style:{fontSize:'13px',fontWeight:700,color:'white',margin:'0 0 4px'}},'Home Calibration'),
+            h('p',{style:{fontSize:'11px',color:'#64748b',margin:'0 0 10px',lineHeight:1.4}},
+              'Set the 0% (HOME) servo position so the train just starts to creep. '+
+              'Turn the native knob control fully to its OFF/start end, press Enter, '+
+              'nudge up until the train just creeps, back off slightly, then press Save Home.'),
+            h('div',{style:{textAlign:'center',margin:'4px 0 10px'}},
+              h('span',{style:{fontSize:'28px',fontFamily:'monospace',fontWeight:700,
+                  color:calOk?'#fbbf24':'#475569'}},
+                (calOk&&homeUs!==null)?String(homeUs):'---'),
+              h('span',{style:{fontSize:'13px',color:'#64748b',marginLeft:'6px'}},'\u00B5s'),
+              h('div',{style:{fontSize:'10px',color:'#64748b',marginTop:'2px'}},
+                !calOk?(isConnected?'Calibration needs FW v1.15':'Connect to calibrate')
+                  :calActive?'CALIBRATING \u2014 working value, not saved yet'
+                  :'Saved HOME')),
+            calActive&&h('p',{style:{fontSize:'11px',fontWeight:600,color:'#fbbf24',
+                textAlign:'center',margin:'0 0 8px'}},
+              'Throttle controls are disabled while calibrating'),
+            h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
+              btn('Enter Calibration',calEnter,calOk&&!calActive,'#34d399')),
+            h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
+              btn('\u221210',()=>calNudge(-10),calOk&&calActive),
+              btn('\u22121',()=>calNudge(-1),calOk&&calActive),
+              btn('+1',()=>calNudge(1),calOk&&calActive),
+              btn('+10',()=>calNudge(10),calOk&&calActive)),
+            h('div',{style:{display:'flex',gap:'6px',marginBottom:'6px'}},
+              btn('Save Home',calSave,calOk&&calActive,'#34d399'),
+              btn('Cancel',calCancel,calOk&&calActive,'#94a3b8')),
+            h('div',{style:{display:'flex',gap:'6px'}},
+              btn('Reset Default (1000 \u00B5s)',calReset,calOk&&calActive,'#f87171'))
+          );
+        })(),
+
         // Horn / Direction
         h('div',{style:{display:'flex',gap:'10px'}},
           h('button',{
@@ -468,7 +574,7 @@ function App(){
         // Footer
         h('div',{style:{textAlign:'center',fontSize:'11px',color:'#1e3a5f',paddingTop:'4px'}},
           h('p',{style:{margin:0}},'Arduino Nano ESP32 + AC1803000 \u00B7 BLE'),
-          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.5 \u00B7 FW v1.13')
+          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.6 SG DRAFT \u00B7 FW v1.15 SG DRAFT')
         )
       )
     ),

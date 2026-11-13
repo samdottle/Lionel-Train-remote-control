@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<!--
+  O27 Controller — Web App
+  UI Version: 1.5
+  Matched Firmware: FW v1.13
+  Proto Release: V1.0
+  Date: 2026-09-04
+
+  UI v1.5:
+    - Speed dial viewport is expanded so the complete 0–100 face is visible.
+    - Explicit 0 / 25 / 50 / 75 / 100 dial markings are shown.
+    - Throttle behavior is unchanged: gauge updates while dragging,
+      and one BLE throttle command is sent only when the slider is released.
+    - Horn and Reverse remain independent immediate controls.
+    - BLE writes remain serialized only at the Web Bluetooth transport layer
+      to prevent "GATT operation already in progress" errors.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<meta name="theme-color" content="#0a0f1e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="O27 Controller">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>O27 Controller</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f1f5f9}
+@keyframes toastIn{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes spinAnim{to{transform:rotate(360deg)}}
+.spin{animation:spinAnim 1s linear infinite}
+.toast-in{animation:toastIn 0.3s ease-out forwards}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:28px;background:transparent;cursor:pointer;margin:0}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:3px;background:#1e293b}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;background:#fbbf24;margin-top:-9px;border:2px solid #0d1117}
+input[type=range]:disabled::-webkit-slider-thumb{background:#475569}
+input[type=range]:disabled{cursor:not-allowed}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const {useState,useEffect,useRef,useCallback}=React;
+const h=React.createElement;
+
+// ── BLE service (must match firmware/o27_controller/include/config.h) ─────────
+const SERVICE_UUID   ='0027aaa0-0001-4000-8000-00805f9b0027';
+const THROTTLE_UUID  ='0027aaa1-0001-4000-8000-00805f9b0027'; // write, 1 byte 0-100
+const HORN_UUID      ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, hold (nonzero=held, 0=released)
+const DIRECTION_UUID ='0027aaa3-0001-4000-8000-00805f9b0027'; // write, momentary
+const STATUS_UUID    ='0027aaa4-0001-4000-8000-00805f9b0027'; // read+notify, JSON
+
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function clamp(v,a,b){return Math.min(Math.max(v,a),b)}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function useToast(){
+  const[ts,setTs]=useState([]);
+  const show=useCallback((msg,type='info')=>{
+    const id=Date.now();
+    setTs(t=>[...t,{id,msg,type}]);
+    setTimeout(()=>setTs(t=>t.filter(x=>x.id!==id)),3000);
+  },[]);
+  return{ts,show};
+}
+
+// ── Speed dial ──────────────────────────────────────────────────────────────
+// Echoes the AC1803000's own OFF -> FULL SPEED dial face: a ~270deg sweep
+// with tick marks and a needle, rather than a generic progress ring.
+function SpeedDial({percent,active}){
+  // Full 270-degree AC1803000-style face. The SVG viewport intentionally
+  // includes the bottom endpoints so 0 and 100 can never be clipped.
+  const R=118;
+  const startDeg=135,endDeg=405;
+  const toRad=d=>d*Math.PI/180;
+  const needleDeg=startDeg+(endDeg-startDeg)*(percent/100);
+  const na=toRad(needleDeg);
+  const needleR=R*0.68;
+  const nx=needleR*Math.cos(na),ny=needleR*Math.sin(na);
+  const ticks=[];
+  for(let pct=0;pct<=100;pct+=5){
+    const a=toRad(startDeg+(endDeg-startDeg)*(pct/100));
+    const major=(pct%25===0);
+    const r1=R*(major?0.76:0.83),r2=R*0.96;
+    ticks.push(h('line',{key:`tick-${pct}`,
+      x1:r1*Math.cos(a),y1:r1*Math.sin(a),x2:r2*Math.cos(a),y2:r2*Math.sin(a),
+      stroke:major?'rgba(148,163,184,0.65)':'rgba(255,255,255,0.18)',
+      strokeWidth:major?2.5:1.2,strokeLinecap:'round'}));
+  }
+
+  const labels=[0,25,50,75,100].map(pct=>{
+    const a=toRad(startDeg+(endDeg-startDeg)*(pct/100));
+    const lr=R*1.08;
+    return h('text',{key:`label-${pct}`,
+      x:lr*Math.cos(a),y:lr*Math.sin(a)+4,
+      textAnchor:'middle',fill:(pct===0||pct===100)?'#94a3b8':'#64748b',
+      fontSize:(pct===0||pct===100)?13:11,fontWeight:700},String(pct));
+  });
+
+  const arcR=R*0.90;
+  const sx=arcR*Math.cos(toRad(startDeg)),sy=arcR*Math.sin(toRad(startDeg));
+  const ex=arcR*Math.cos(toRad(endDeg)),ey=arcR*Math.sin(toRad(endDeg));
+  const needleCol=active?'#fbbf24':'#475569';
+
+  return h('div',{style:{display:'flex',justifyContent:'center'}},
+    h('svg',{
+        width:'100%',height:280,viewBox:'-140 -140 280 280',
+        style:{maxWidth:'300px',display:'block',overflow:'visible'}},
+      h('path',{
+          d:`M ${sx} ${sy} A ${arcR} ${arcR} 0 1 1 ${ex} ${ey}`,
+          fill:'none',stroke:'rgba(255,255,255,0.12)',strokeWidth:3,
+          strokeLinecap:'round'}),
+      ...ticks,
+      ...labels,
+      h('line',{x1:0,y1:0,x2:nx,y2:ny,stroke:needleCol,strokeWidth:5,
+          strokeLinecap:'round',style:{transition:'all 0.15s ease-out'}}),
+      h('circle',{cx:0,cy:0,r:8,fill:needleCol,
+          style:{transition:'fill 0.15s ease-out'}}),
+      h('text',{x:-102,y:126,textAnchor:'middle',fill:'#475569',
+          fontSize:10,fontWeight:700},'OFF'),
+      h('text',{x:102,y:126,textAnchor:'middle',fill:'#475569',
+          fontSize:10,fontWeight:700},'FULL SPEED')
+    ));
+}
+
+// ── Icon glyphs (matched to the AC1803000's own front-panel icons) ───────────
+function HornIcon(){
+  return h('svg',{width:22,height:22,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:2},
+    h('circle',{cx:12,cy:12,r:2.5,fill:'currentColor',stroke:'none'}),
+    h('path',{d:'M12 12 A5 5 0 0 1 12 7',strokeLinecap:'round'}),
+    h('path',{d:'M12 12 A8 8 0 0 1 12 3.5',strokeLinecap:'round',opacity:0.6}),
+    h('path',{d:'M12 12 A5 5 0 0 0 12 17',strokeLinecap:'round'}),
+    h('path',{d:'M12 12 A8 8 0 0 0 12 20.5',strokeLinecap:'round',opacity:0.6}));
+}
+function DirectionIcon(){
+  return h('svg',{width:22,height:22,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:2},
+    h('path',{d:'M8 6L3 12L8 18',strokeLinecap:'round',strokeLinejoin:'round'}),
+    h('line',{x1:12,y1:5,x2:12,y2:19,strokeLinecap:'round'}),
+    h('path',{d:'M16 6L21 12L16 18',strokeLinecap:'round',strokeLinejoin:'round'}));
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App(){
+  const{ts,show:toast}=useToast();
+
+  const[isConnecting,setIsConnecting]=useState(false);
+  const[isConnected,setIsConnected]=useState(false);
+  const[deviceName,setDeviceName]=useState('');
+  const devRef=useRef(null);
+  const throttleCharRef=useRef(null),hornCharRef=useRef(null),directionCharRef=useRef(null);
+
+  // Transport safeguard only: Android/Chrome Web Bluetooth generally permits
+  // only one GATT operation at a time. The controls remain logically
+  // independent; this queue merely prevents overlapping radio transactions.
+  const gattQueueRef=useRef(Promise.resolve());
+
+  const[throttle,setThrottle]=useState(0);   // last known/displayed throttle 0-100
+  const[mode,setMode]=useState('remote');    // 'local' | 'remote', from firmware status
+
+  const[demoMode,setDemoMode]=useState(false);
+
+  const controllable=demoMode||(isConnected&&mode==='remote');
+
+  // ── BLE status notifications ──────────────────────────────────────────────
+  const onStatus=useCallback(e=>{
+    try{
+      const text=new TextDecoder().decode(e.target.value);
+      const data=JSON.parse(text);
+      if(typeof data.throttle==='number')setThrottle(clamp(data.throttle,0,100));
+      if(data.mode==='local'||data.mode==='remote')setMode(data.mode);
+    }catch(_){/* malformed packet, skip */}
+  },[]);
+
+  const onDisc=useCallback(()=>{
+    setIsConnected(false);
+    setHornPressed(false);
+    setReversePressed(false);
+    throttleCharRef.current=null;hornCharRef.current=null;directionCharRef.current=null;
+    gattQueueRef.current=Promise.resolve();
+    toast('Disconnected');
+  },[toast]);
+
+  const connect=useCallback(async()=>{
+    if(!navigator.bluetooth){toast('Use Chrome on Android, Chrome OS, or desktop','error');return;}
+    setIsConnecting(true);
+    try{
+      const d=await navigator.bluetooth.requestDevice({
+        filters:[{services:[SERVICE_UUID]}],optionalServices:[SERVICE_UUID]});
+      d.addEventListener('gattserverdisconnected',onDisc);devRef.current=d;
+      let s;
+      for(let i=1;i<=3;i++){
+        try{s=await d.gatt.connect();break;}
+        catch(e){if(i===3)throw e;await new Promise(r=>setTimeout(r,1000));}
+      }
+      const svc=await s.getPrimaryService(SERVICE_UUID);
+      throttleCharRef.current=await svc.getCharacteristic(THROTTLE_UUID);
+      hornCharRef.current=await svc.getCharacteristic(HORN_UUID);
+      directionCharRef.current=await svc.getCharacteristic(DIRECTION_UUID);
+      try{
+        const status=await svc.getCharacteristic(STATUS_UUID);
+        await status.startNotifications();
+        status.addEventListener('characteristicvaluechanged',onStatus);
+        const initial=await status.readValue().catch(()=>null);
+        if(initial)onStatus({target:{value:initial}});
+      }catch(_){}
+      setDeviceName(d.name||'O27 Controller');
+      setIsConnected(true);setDemoMode(false);
+      toast(`Connected to ${d.name||'O27 Controller'}`,'success');
+    }catch(e){if(e.name!=='NotFoundError')toast('Connection failed: '+e.message,'error');}
+    setIsConnecting(false);
+  },[onStatus,onDisc,toast]);
+
+  const disconnect=useCallback(()=>{
+    if(devRef.current?.gatt?.connected)devRef.current.gatt.disconnect();
+    setIsConnected(false);
+  },[]);
+
+  // ── Commands ─────────────────────────────────────────────────────────────
+  const queueGattWrite=useCallback((characteristic,payload,label,silent=false)=>{
+    if(!characteristic){
+      if(!silent)toast('Not connected','error');
+      return Promise.resolve(false);
+    }
+
+    const operation=gattQueueRef.current
+      .catch(()=>{})
+      .then(async()=>{
+        if(!devRef.current?.gatt?.connected)throw new Error('Not connected');
+        await characteristic.writeValue(payload);
+      });
+
+    // Keep the internal queue alive even if one command fails.
+    gattQueueRef.current=operation.catch(()=>{});
+
+    return operation.then(()=>true).catch(e=>{
+      if(!silent)toast(label+' command failed: '+e.message,'error');
+      return false;
+    });
+  },[toast]);
+
+  const writeThrottle=useCallback(percent=>{
+    if(!throttleCharRef.current)return Promise.resolve(false);
+    return queueGattWrite(
+      throttleCharRef.current,
+      new Uint8Array([percent]),
+      'Throttle',
+      true
+    );
+  },[queueGattWrite]);
+
+  const onSliderInput=useCallback(percent=>{
+    // While dragging, update only the local display/gauge.
+    // No BLE throttle traffic is generated here.
+    setThrottle(percent);
+  },[]);
+
+  const onSliderRelease=useCallback(percent=>{
+    setThrottle(percent);
+    if(isConnected)writeThrottle(percent); // exactly one speed write on release
+  },[isConnected,writeThrottle]);
+
+  const emergencyStop=useCallback(()=>{
+    setThrottle(0);
+    if(isConnected)writeThrottle(0);
+    toast('Emergency stop','error');
+  },[isConnected,writeThrottle,toast]);
+
+  const [hornPressed,setHornPressed]=useState(false);
+  const [reversePressed,setReversePressed]=useState(false);
+
+  const sendHorn=useCallback(async held=>{
+    const characteristic=hornCharRef.current;
+    if(!characteristic){toast('Not connected','error');return false;}
+    return queueGattWrite(
+      characteristic,
+      new Uint8Array([held?1:0]),
+      'Horn'
+    );
+  },[queueGattWrite,toast]);
+
+  // Press-and-hold: fires on press, releases on lift-off — covers both
+  // mouse and touch. The shared GATT queue guarantees ON and OFF are sent
+  // in order instead of becoming overlapping Bluetooth operations.
+  const hornDown=useCallback(e=>{
+    e.preventDefault();
+    if(e.currentTarget.setPointerCapture){
+      try{e.currentTarget.setPointerCapture(e.pointerId);}catch(_){}
+    }
+    setHornPressed(true);
+    sendHorn(true);
+  },[sendHorn]);
+
+  const hornUp=useCallback(e=>{
+    e.preventDefault();
+    setHornPressed(false);
+    sendHorn(false);
+    if(e.currentTarget.releasePointerCapture){
+      try{e.currentTarget.releasePointerCapture(e.pointerId);}catch(_){}
+    }
+  },[sendHorn]);
+
+  const fireDirection=useCallback(async()=>{
+    const characteristic=directionCharRef.current;
+    if(!characteristic){toast('Not connected','error');return;}
+
+    // Immediate visual feedback confirms the tap was registered.
+    setReversePressed(true);
+    const ok=await queueGattWrite(
+      characteristic,
+      new Uint8Array([1]),
+      'Reverse'
+    );
+    window.setTimeout(()=>setReversePressed(false),ok?220:350);
+  },[queueGattWrite,toast]);
+
+  const sc=isConnected?(mode==='local'?'#94a3b8':'#34d399'):demoMode?'#c084fc':'#475569';
+  const sl=isConnected?deviceName:demoMode?'Demo mode':'Not connected';
+
+  return h(React.Fragment,null,
+    h('div',{style:{minHeight:'100vh',
+        background:'linear-gradient(135deg,#020617,#0f172a,#020617)',
+        paddingBottom:'2rem'}},
+
+      // Header
+      h('header',{style:{position:'sticky',top:0,zIndex:50,
+          background:'rgba(2,6,23,0.9)',backdropFilter:'blur(12px)',
+          borderBottom:'1px solid rgba(30,58,95,0.4)'}},
+        h('div',{style:{maxWidth:'420px',margin:'0 auto',padding:'12px 16px',
+            display:'flex',alignItems:'center',justifyContent:'space-between'}},
+          h('div',null,
+            h('h1',{style:{fontSize:'22px',fontWeight:300,color:'white',margin:0,lineHeight:1}},
+              'O27 ',h('span',{style:{fontWeight:700,color:'#fbbf24'}},'Controller')),
+            h('p',{style:{fontSize:'10px',color:'#475569',margin:'2px 0 0'}},
+              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.5 \u00B7 FW v1.13')
+          ),
+          h('div',{style:{display:'flex',alignItems:'center',gap:'5px',padding:'4px 10px',
+              borderRadius:'20px',border:`1px solid ${sc}40`,background:`${sc}12`,
+              fontSize:'11px',fontWeight:500,color:sc}},
+            h('span',{style:{width:'6px',height:'6px',borderRadius:'50%',
+                background:sc,display:'inline-block'}}),sl)
+        )
+      ),
+
+      h('main',{style:{maxWidth:'420px',margin:'0 auto',padding:'16px',
+          display:'flex',flexDirection:'column',gap:'12px'}},
+
+        // BLE card
+        h('div',{style:{background:'rgba(13,17,23,0.7)',borderRadius:'16px',
+            border:'1px solid rgba(30,58,95,0.5)',padding:'14px'}},
+          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between'}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:'10px'}},
+              h('div',{style:{width:'36px',height:'36px',borderRadius:'50%',
+                  display:'flex',alignItems:'center',justifyContent:'center',fontSize:'18px',
+                  background:isConnected?'rgba(52,211,153,0.2)':'rgba(30,41,59,0.5)'}},
+                isConnected?'\uD83D\uDCF6':'\uD83D\uDCF5'),
+              h('div',null,
+                h('p',{style:{fontSize:'13px',fontWeight:600,color:'white',margin:0}},
+                  isConnected?deviceName:'Not Connected'),
+                h('p',{style:{fontSize:'11px',color:'#475569',margin:0}},
+                  isConnected?'BLE connected':'Tap Connect to pair'))
+            ),
+            h('div',{style:{display:'flex',alignItems:'center',gap:'6px'}},
+              // Demo toggle
+              h('button',{onClick:()=>setDemoMode(d=>!d),disabled:isConnected,
+                  style:{padding:'5px 10px',borderRadius:'8px',
+                    border:`1px solid ${demoMode?'rgba(192,132,252,0.5)':'#1e293b'}`,
+                    background:demoMode?'rgba(192,132,252,0.2)':'rgba(15,25,41,0.6)',
+                    color:demoMode?'#c084fc':'#475569',
+                    fontSize:'11px',fontWeight:600,
+                    cursor:isConnected?'not-allowed':'pointer',
+                    opacity:isConnected?0.3:1}},
+                demoMode?'Stop':'Demo'),
+              // Connect
+              h('button',{onClick:isConnected?disconnect:connect,disabled:isConnecting,
+                  style:{padding:'6px 12px',borderRadius:'8px',
+                    background:isConnected?'#1e293b':'#059669',
+                    color:'white',fontSize:'12px',fontWeight:700,
+                    border:'none',cursor:isConnecting?'not-allowed':'pointer',
+                    opacity:isConnecting?0.5:1,
+                    display:'flex',alignItems:'center',gap:'4px'}},
+                isConnecting
+                  ?h('svg',{className:'spin',width:14,height:14,viewBox:'0 0 24 24',fill:'none'},
+                      h('circle',{cx:12,cy:12,r:10,stroke:'currentColor',strokeWidth:4,opacity:0.25}),
+                      h('path',{d:'M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z',fill:'currentColor',opacity:0.75}))
+                  :null,
+                isConnecting?'Scanning\u2026':isConnected?'Disconnect':'Connect')
+            )
+          )
+        ),
+
+        // Mode banner
+        (isConnected&&mode==='local')&&h('div',{style:{borderRadius:'14px',
+            border:'1px solid rgba(148,163,184,0.35)',padding:'11px 16px',
+            display:'flex',alignItems:'center',justifyContent:'center',gap:'8px',
+            background:'rgba(71,85,105,0.15)'}},
+          h('svg',{width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:'#94a3b8',strokeWidth:2},
+            h('rect',{x:5,y:11,width:14,height:9,rx:2}),
+            h('path',{d:'M8 11V7a4 4 0 018 0v4'})),
+          h('p',{style:{fontSize:'12px',fontWeight:600,color:'#94a3b8',margin:0,
+              letterSpacing:'0.02em'}},'LOCAL CONTROL \u2014 front panel pot has the throttle')),
+
+        // Speed dial + throttle readout
+        h('div',{style:{background:'rgba(13,17,23,0.7)',borderRadius:'16px',
+            border:'1px solid rgba(30,58,95,0.5)',padding:'16px'}},
+          h(SpeedDial,{percent:throttle,active:controllable}),
+          h('div',{style:{textAlign:'center',marginTop:'-6px'}},
+            h('span',{style:{fontSize:'32px',fontFamily:'monospace',fontWeight:700,
+                color:controllable?'#fbbf24':'#475569'}},`${Math.round(throttle)}%`)),
+          h('input',{type:'range',min:0,max:100,step:1,value:throttle,
+              disabled:!controllable,
+              onInput:e=>onSliderInput(parseInt(e.target.value,10)),
+              onPointerUp:e=>onSliderRelease(parseInt(e.currentTarget.value,10)),
+              onKeyUp:e=>onSliderRelease(parseInt(e.currentTarget.value,10)),
+              style:{marginTop:'10px'}}),
+          h('div',{style:{display:'flex',justifyContent:'space-between',
+              fontSize:'10px',color:'#334155'}},
+            h('span',null,'OFF'),h('span',null,'FULL SPEED')),
+          !controllable&&!isConnected&&!demoMode&&h('p',{style:{fontSize:'10px',
+              color:'#1e3a5f',textAlign:'center',margin:'10px 0 0'}},
+            'Connect (or start Demo) to control throttle')
+        ),
+
+        // Horn / Direction
+        h('div',{style:{display:'flex',gap:'10px'}},
+          h('button',{
+              onPointerDown:hornDown,onPointerUp:hornUp,onPointerCancel:hornUp,
+              disabled:!isConnected,
+              style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'6px',
+                padding:'16px',borderRadius:'14px',
+                border:hornPressed?'1px solid #fbbf24':'1px solid rgba(30,58,95,0.5)',
+                background:hornPressed?'rgba(251,191,36,0.15)':'rgba(13,17,23,0.7)',
+                color:isConnected?'#fbbf24':'#334155',
+                cursor:isConnected?'pointer':'not-allowed',
+                userSelect:'none',touchAction:'none'}},
+            h(HornIcon,null),
+            h('span',{style:{fontSize:'12px',fontWeight:700,letterSpacing:'0.05em'}},'HORN (hold)')),
+          h('button',{onClick:fireDirection,disabled:!isConnected,
+              style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'6px',
+                padding:'16px',borderRadius:'14px',
+                border:reversePressed?'1px solid #fbbf24':'1px solid rgba(30,58,95,0.5)',
+                background:reversePressed?'rgba(251,191,36,0.15)':'rgba(13,17,23,0.7)',
+                color:isConnected?'#fbbf24':'#334155',
+                transform:reversePressed?'scale(0.98)':'scale(1)',
+                transition:'background 100ms,border-color 100ms,transform 80ms',
+                cursor:isConnected?'pointer':'not-allowed'}},
+            h(DirectionIcon,null),
+            h('span',{style:{fontSize:'12px',fontWeight:700,letterSpacing:'0.05em'}},'REVERSE'))
+        ),
+
+        // Emergency stop
+        h('button',{
+            onClick:emergencyStop,
+            disabled:!controllable,
+            style:{width:'100%',padding:'13px',borderRadius:'14px',
+              border:'1px solid rgba(248,113,113,0.4)',
+              background:controllable?'rgba(248,113,113,0.12)':'rgba(71,85,105,0.1)',
+              color:controllable?'#f87171':'#475569',
+              fontSize:'14px',fontWeight:800,letterSpacing:'0.05em',
+              cursor:controllable?'pointer':'not-allowed'}},
+          'EMERGENCY STOP'),
+
+        // Footer
+        h('div',{style:{textAlign:'center',fontSize:'11px',color:'#1e3a5f',paddingTop:'4px'}},
+          h('p',{style:{margin:0}},'Arduino Nano ESP32 + AC1803000 \u00B7 BLE'),
+          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.5 \u00B7 FW v1.13')
+        )
+      )
+    ),
+    // Toasts
+    h('div',{style:{position:'fixed',bottom:'1.5rem',left:'50%',
+        transform:'translateX(-50%)',zIndex:1000,
+        display:'flex',flexDirection:'column',gap:'8px',
+        alignItems:'center',pointerEvents:'none'}},
+      ts.map(t=>h('div',{key:t.id,className:'toast-in',
+          style:{padding:'8px 18px',borderRadius:'20px',fontSize:'13px',
+            fontWeight:500,boxShadow:'0 4px 20px rgba(0,0,0,0.5)',
+            background:t.type==='error'?'rgba(239,68,68,0.92)':
+              t.type==='success'?'rgba(16,185,129,0.92)':'rgba(30,41,59,0.96)',
+            color:'white'}},t.msg))
+    )
+  );
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>reg.update()).catch(()=>{});
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(!sessionStorage.getItem('o27-sw-reloaded')){
+      sessionStorage.setItem('o27-sw-reloaded','1');
+      location.reload();
+    }
+  });
+}
+ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>
