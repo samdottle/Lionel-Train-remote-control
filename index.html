@@ -2,7 +2,7 @@
 <!--
   O27 Controller — Web App
   UI Version: 1.7 SG DRAFT
-  Matched Firmware: FW v1.16 SG DRAFT (with FW v1.15 only HOME calibration
+  Matched Firmware: FW v1.17 SG DRAFT (with FW v1.15 only HOME calibration
                     works; with FW v1.13 the calibration controls stay disabled)
   Proto Release: V1.0 + calibration characteristic
   Date: 2026-11-13  (Nov 13 2026)
@@ -15,7 +15,7 @@
       selected target's value is the working (unsaved) one.
         HOME  = 0% park position, zero track volts
         START = 1% position, where the engine just begins to move (~4 VAC)
-        MAX   = 100% position; nudge up until track reads ~15 VAC (capped 2500 us)
+        MAX   = 100% position; nudge up until track reads ~15 VAC (capped 2600 us with FW v1.17, 2500 us with FW v1.16)
     - Enter / -50 -10 -1 +1 +10 +50 / Save / Reset / Cancel act on the selected
       target. Selecting a target while calibrating sends BLE cal command
       0x06 <target 0|1|2>; Enter always starts on HOME (firmware), and if
@@ -61,7 +61,7 @@
 <meta name="apple-mobile-web-app-title" content="O27 Controller">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
-<title>O27 Controller UI v1.7 SG DRAFT</title>
+<title>O27 Controller UI v1.8 SG DRAFT</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <style>
@@ -95,7 +95,7 @@ const CAL_ENTER=1,CAL_CANCEL=2,CAL_SAVE=3,CAL_RESET=4,CAL_NUDGE=5,CAL_SELECT=6; 
 const CAL_TARGETS=[
   {id:0,name:'HOME', key:'home', def:1000,hint:'HOME: 0% park position, zero track volts.'},
   {id:1,name:'START',key:'start',def:1876,hint:'START: 1% position, where the train just begins to move (about 4 VAC).'},
-  {id:2,name:'MAX',  key:'max',  def:2200,hint:'MAX: track voltage at 100%. Nudge up until the track reads about 15 VAC (target). Capped at 2500 \u00B5s; stop before any binding or stall.'}
+  {id:2,name:'MAX',  key:'max',  def:2200,hint:'MAX: track voltage at 100%. Nudge up until the track reads about 15 VAC (target). Capped by firmware at 2600 \u00B5s (FW v1.17; 2500 on FW v1.16); stop before any binding or stall.'}
 ];
 
 
@@ -447,7 +447,7 @@ function App(){
             h('h1',{style:{fontSize:'22px',fontWeight:300,color:'white',margin:0,lineHeight:1}},
               'O27 ',h('span',{style:{fontWeight:700,color:'#fbbf24'}},'Controller')),
             h('p',{style:{fontSize:'10px',color:'#475569',margin:'2px 0 0'}},
-              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.7 SG DRAFT \u00B7 FW v1.16 SG DRAFT')
+              'AC1803000 \u00B7 Nano ESP32 \u00B7 BLE \u00B7 UI v1.8 SG DRAFT \u00B7 FW v1.17 SG DRAFT')
           ),
           h('div',{style:{display:'flex',alignItems:'center',gap:'5px',padding:'4px 10px',
               borderRadius:'20px',border:`1px solid ${sc}40`,background:`${sc}12`,
@@ -650,7 +650,7 @@ function App(){
         // Footer
         h('div',{style:{textAlign:'center',fontSize:'11px',color:'#1e3a5f',paddingTop:'4px'}},
           h('p',{style:{margin:0}},'Arduino Nano ESP32 + AC1803000 \u00B7 BLE'),
-          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.7 SG DRAFT \u00B7 FW v1.16 SG DRAFT')
+          h('p',{style:{margin:'3px 0 0'}},'\u00A9 O27 Controller \u00B7 UI v1.8 SG DRAFT \u00B7 FW v1.17 SG DRAFT')
         )
       )
     ),
