@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<!--
+  O27 Button Speed Preview v2 SG DRAFT
+  Date: 2026-11-15
+  Status: PREVIEW ONLY - UNTESTED on hardware. Not approved, not final. Provenance SG.
+  v2: six speed buttons (STOP, SLOW, MEDIUM / FAST, minus, plus) plus a HORN / REVERSE row.
+  HORN and REVERSE copy UI v1.8: HORN = press-and-hold (write [1] on press, [0] on release/cancel)
+  to char 0027aaa2; REVERSE = momentary tap, write [1] to char 0027aaa3, no interlock.
+  Both are enabled whenever connected (v1.8 does NOT gate them on local/cal mode).
+  Still no calibration commands.   Optional BLE: same service/characteristic UUIDs as UI v1.8. ONLY writes the
+  throttle (1 byte, 0-100), horn and direction characteristics, and reads status.
+  No calibration commands. No service worker, no manifest, no CDN.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<meta name="theme-color" content="#0a0f1e">
+<title>O27 Button Speed Preview v2 SG DRAFT</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f1f5f9;overscroll-behavior:none}
+body{display:flex;justify-content:center}
+#app{width:100%;max-width:480px;min-height:100%;padding:12px 14px 12px;display:flex;flex-direction:column;gap:10px}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+h1{font-size:17px;margin:0;font-weight:800}
+.sub{font-size:11px;color:#94a3b8;margin:2px 0 0}
+button{font-family:inherit;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+#btnConnect{flex:none;padding:9px 12px;border-radius:10px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.10);color:#fbbf24;font-size:12px;font-weight:700;min-height:40px}
+#btnConnect[disabled]{border-color:#1e293b;color:#475569;background:rgba(15,25,41,.6)}
+#btnConnect.on{border-color:#34d399;color:#34d399;background:rgba(52,211,153,.12)}
+#read{text-align:center;font-family:monospace;font-size:84px;font-weight:800;color:#fbbf24;line-height:1.1;padding:6px 0 0}
+#readLbl{text-align:center;font-size:12px;color:#64748b;font-weight:700;letter-spacing:.1em;margin-top:-4px}
+#note{font-size:12px;color:#f59e0b;min-height:16px;text-align:center}
+#grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:6px}
+.b{border-radius:18px;border:2px solid #334155;background:#1e293b;color:#e2e8f0;font-size:24px;font-weight:900;letter-spacing:.03em;display:flex;align-items:center;justify-content:center;flex-direction:column;aspect-ratio:1/1.2;padding:0;transition:background .08s,transform .08s}
+.b small{font-size:14px;font-weight:700;color:#94a3b8;margin-top:4px}
+.b:active{transform:scale(.96);background:#334155}
+.b.stop{background:#dc2626;border-color:#fecaca;color:#fff}
+.b.stop:active{background:#991b1b}
+.b.sym{font-size:64px}
+.b.sel{background:#d97706;border-color:#fcd34d;color:#fff;box-shadow:0 0 0 3px rgba(251,191,36,.35)}
+.b.sel small{color:#fff}
+.dis #grid .b:not(.stop){opacity:.4;pointer-events:none}
+#row2{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+#row2 .b{aspect-ratio:1/.8;font-size:26px;touch-action:none}
+#row2 .b.off{opacity:.4;pointer-events:none}
+#row2 .b.press{background:#d97706;border-color:#fcd34d;color:#fff;transform:scale(.97)}
+#row2 .b small{font-size:12px}
+.foot{margin-top:auto;text-align:center;font-size:10px;color:#64748b;line-height:1.5}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:rgba(30,41,59,.96);color:#fff;padding:8px 16px;border-radius:20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90%;text-align:center}
+#toast.show{opacity:1}#toast.err{background:rgba(239,68,68,.92)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="top">
+    <div><h1>O27 Button Speed Preview v2 SG DRAFT</h1><p class="sub" id="modeLine">Not connected</p></div>
+    <button id="btnConnect" type="button">Connect controller</button>
+  </div>
+  <div id="read">0%</div>
+  <div id="readLbl">SPEED</div>
+  <div id="note"></div>
+  <div id="grid">
+    <button class="b stop" id="bStop" type="button">STOP</button>
+    <button class="b" id="bSlow" type="button"></button>
+    <button class="b" id="bMed" type="button"></button>
+    <button class="b" id="bFast" type="button"></button>
+    <button class="b sym" id="bMinus" type="button" aria-label="Slower">&minus;</button>
+    <button class="b sym" id="bPlus" type="button" aria-label="Faster">+</button>
+  </div>
+  <div id="row2">
+    <button class="b" id="bHorn" type="button">HORN<small>hold</small></button>
+    <button class="b" id="bRev" type="button">REVERSE</button>
+  </div>
+  <div class="foot">Preview only &middot; untested &middot; SG &middot; not approved/final</div>
+</div>
+<div id="toast"></div>
+<script>
+'use strict';
+// ── Presets (edit here) ──
+const SLOW=25, MEDIUM=50, FAST=75; // percent
+const STEP=5;                      // minus / plus step, percent
+
+// ── BLE (same UUIDs as UI v1.8; throttle write + status read only) ──
+const SERVICE_UUID  ='0027aaa0-0001-4000-8000-00805f9b0027';
+const THROTTLE_UUID ='0027aaa1-0001-4000-8000-00805f9b0027'; // write, 1 byte 0-100
+const STATUS_UUID   ='0027aaa4-0001-4000-8000-00805f9b0027'; // read+notify, JSON
+const HORN_UUID     ='0027aaa2-0001-4000-8000-00805f9b0027'; // write, hold (nonzero=held, 0=released)
+const DIRECTION_UUID='0027aaa3-0001-4000-8000-00805f9b0027'; // write, momentary (1)
+const MIN_WRITE_GAP_MS=150;
+
+const $=id=>document.getElementById(id);
+const clamp=(v,a,b)=>Math.min(Math.max(v,a),b);
+const S={throttle:0,connected:false,mode:'remote',cal:false,horn:false,writeLog:[]};
+// UI v1.8 enables HORN/REVERSE whenever connected (not gated on local/cal mode). Set true to also gate them.
+const GATE_HORN_REVERSE_ON_REMOTE=false;
+const controllable=()=>!S.connected||(S.mode==='remote'&&!S.cal);
+function vib(ms){try{if(navigator.vibrate)navigator.vibrate(ms);}catch(_){}}
+let toastT=null;
+function toast(m,err){const t=$('toast');t.textContent=m;t.className='show'+(err?' err':'');clearTimeout(toastT);toastT=setTimeout(()=>{t.className='';},2600);}
+
+let hornChar=null,dirChar=null;
+let dev=null,thrChar=null,gattQ=Promise.resolve(),lastWrite=0,pendingVal=null,pendTimer=null;
+// v1.8 queueGattWrite: one GATT op at a time, shared queue for all characteristics
+function queueWrite(ch,payload,label){
+  if(!ch){toast('Not connected',true);return Promise.resolve(false);}
+  const op=gattQ.catch(()=>{}).then(async()=>{
+    if(!dev||!dev.gatt.connected)throw new Error('Not connected');
+    await ch.writeValue(payload);
+  });
+  gattQ=op.catch(()=>{});
+  return op.then(()=>true).catch(e=>{toast(label+' command failed: '+e.message,true);return false;});
+}
+function doWrite(v){
+  if(!thrChar)return;
+  lastWrite=Date.now();const ch=thrChar;
+  const op=gattQ.catch(()=>{}).then(async()=>{
+    if(!dev||!dev.gatt.connected)throw new Error('Not connected');
+    await ch.writeValue(new Uint8Array([v]));S.writeLog.push(v);
+  });
+  gattQ=op.catch(()=>{});
+}
+function sendThrottle(p,immediate){
+  if(!S.connected||!thrChar)return;
+  p=clamp(Math.round(p),0,100);
+  if(immediate){clearTimeout(pendTimer);pendTimer=null;pendingVal=null;doWrite(p);return;}
+  if(!controllable())return;
+  const wait=lastWrite+MIN_WRITE_GAP_MS-Date.now();
+  if(wait<=0&&pendTimer===null){doWrite(p);return;}
+  pendingVal=p;
+  if(pendTimer===null)pendTimer=setTimeout(()=>{pendTimer=null;const v=pendingVal;pendingVal=null;if(v!==null)doWrite(v);},Math.max(wait,0));
+}
+function onStatus(e){
+  try{
+    const d=JSON.parse(new TextDecoder().decode(e.target.value));
+    if(d.mode==='local'||d.mode==='remote')S.mode=d.mode;
+    if(typeof d.cal==='number')S.cal=(d.cal===1);
+    if(typeof d.throttle==='number'){S.throttle=clamp(Math.round(d.throttle),0,100);}
+    render();refresh();
+  }catch(_){}
+}
+function onDisc(){
+  S.connected=false;thrChar=null;hornChar=null;dirChar=null;dev=null;S.horn=false;S.mode='remote';S.cal=false;
+  clearTimeout(pendTimer);pendTimer=null;pendingVal=null;refresh();toast('Disconnected');
+}
+async function connect(){
+  if(S.connected){if(dev&&dev.gatt.connected)dev.gatt.disconnect();return;}
+  const btn=$('btnConnect');btn.disabled=true;btn.textContent='Connecting\u2026';
+  try{
+    const d=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}],optionalServices:[SERVICE_UUID]});
+    d.addEventListener('gattserverdisconnected',onDisc);dev=d;
+    let s;
+    for(let i=1;i<=3;i++){try{s=await d.gatt.connect();break;}catch(e){if(i===3)throw e;await new Promise(r=>setTimeout(r,1000));}}
+    const svc=await s.getPrimaryService(SERVICE_UUID);
+    thrChar=await svc.getCharacteristic(THROTTLE_UUID);
+    hornChar=await svc.getCharacteristic(HORN_UUID);
+    dirChar=await svc.getCharacteristic(DIRECTION_UUID);
+    S.connected=true;
+    try{
+      const st=await svc.getCharacteristic(STATUS_UUID);
+      await st.startNotifications();
+      st.addEventListener('characteristicvaluechanged',onStatus);
+      const init=await st.readValue().catch(()=>null);
+      if(init)onStatus({target:{value:init}});
+    }catch(_){}
+    refresh();toast('Connected to '+(d.name||'O27 Controller'));
+  }catch(e){S.connected=!!(dev&&dev.gatt&&dev.gatt.connected&&thrChar);if(e.name!=='NotFoundError')toast('Connection failed: '+e.message,true);}
+  btn.disabled=false;refresh();
+}
+
+function refresh(){
+  const btn=$('btnConnect');
+  if(!navigator.bluetooth){btn.disabled=true;btn.textContent='Bluetooth n/a';btn.title='Web Bluetooth not available in this browser (use Chrome on Android)';}
+  else{btn.disabled=false;btn.textContent=S.connected?'Disconnect':'Connect controller';btn.classList.toggle('on',S.connected);}
+  $('modeLine').textContent=S.connected?'Connected':'Not connected (nothing is sent)';
+  let note='';
+  if(S.connected&&S.cal)note='Controller is in calibration mode \u2014 buttons disabled (STOP still works)';
+  else if(S.connected&&S.mode==='local')note='Controller is in LOCAL mode \u2014 buttons disabled (STOP still works)';
+  $('note').textContent=note;
+  document.body.classList.toggle('dis',!controllable());
+  const trainOk=S.connected&&(!GATE_HORN_REVERSE_ON_REMOTE||(S.mode==='remote'&&!S.cal));
+  $('bHorn').classList.toggle('off',!trainOk);$('bRev').classList.toggle('off',!trainOk);
+}
+function render(){
+  $('read').textContent=S.throttle+'%';
+  $('bSlow').className='b'+(S.throttle===SLOW?' sel':'');
+  $('bMed').className='b'+(S.throttle===MEDIUM?' sel':'');
+  $('bFast').className='b'+(S.throttle===FAST?' sel':'');
+}
+function setSpeed(v){
+  if(!controllable())return;
+  S.throttle=clamp(Math.round(v),0,100);render();vib(20);
+  sendThrottle(S.throttle,false);
+}
+function stop(){
+  S.throttle=0;render();vib([60,40,60]);
+  sendThrottle(0,true);
+}
+
+$('bSlow').innerHTML='SLOW<small>'+SLOW+'%</small>';
+$('bMed').innerHTML='MEDIUM<small>'+MEDIUM+'%</small>';
+$('bFast').innerHTML='FAST<small>'+FAST+'%</small>';
+$('bStop').addEventListener('pointerdown',e=>{e.preventDefault();stop();});
+$('bStop').addEventListener('click',e=>{if(e.detail===0)stop();});
+$('bSlow').addEventListener('click',()=>setSpeed(SLOW));
+$('bMed').addEventListener('click',()=>setSpeed(MEDIUM));
+$('bFast').addEventListener('click',()=>setSpeed(FAST));
+$('bMinus').addEventListener('click',()=>setSpeed(S.throttle-STEP));
+$('bPlus').addEventListener('click',()=>setSpeed(S.throttle+STEP));
+// HORN: press-and-hold, same as v1.8 (write [1] on press, [0] on release/cancel)
+function hornSend(held){return queueWrite(hornChar,new Uint8Array([held?1:0]),'Horn');}
+function hornDown(e){
+  e.preventDefault();
+  try{e.currentTarget.setPointerCapture(e.pointerId);}catch(_){}
+  S.horn=true;$('bHorn').classList.add('press');vib(20);
+  hornSend(true);
+}
+function hornUp(e){
+  e.preventDefault();
+  S.horn=false;$('bHorn').classList.remove('press');
+  hornSend(false);
+  try{e.currentTarget.releasePointerCapture(e.pointerId);}catch(_){}
+}
+$('bHorn').addEventListener('pointerdown',hornDown);
+$('bHorn').addEventListener('pointerup',hornUp);
+$('bHorn').addEventListener('pointercancel',hornUp);
+// REVERSE: momentary, write [1] to direction char, no speed interlock (as v1.8)
+async function fireReverse(){
+  if(!dirChar){toast('Not connected',true);return;}
+  const b=$('bRev');b.classList.add('press');vib(30);
+  const ok=await queueWrite(dirChar,new Uint8Array([1]),'Reverse');
+  setTimeout(()=>b.classList.remove('press'),ok?220:350);
+}
+$('bRev').addEventListener('click',fireReverse);
+$('btnConnect').addEventListener('click',connect);
+document.addEventListener('contextmenu',e=>{if(e.target.closest('#grid,#row2'))e.preventDefault();});
+render();refresh();
+window.__S=S;
+</script>
+</body>
+</html>
