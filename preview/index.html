@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  O27 Button Speed Preview v2 SG DRAFT
+  O27 Button Speed Preview v3 SG DRAFT
   Date: 2026-11-15
   Status: PREVIEW ONLY - UNTESTED on hardware. Not approved, not final. Provenance SG.
   v2: six speed buttons (STOP, SLOW, MEDIUM / FAST, minus, plus) plus a HORN / REVERSE row.
@@ -16,7 +16,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <meta name="theme-color" content="#0a0f1e">
-<title>O27 Button Speed Preview v2 SG DRAFT</title>
+<title>O27 Button Speed Preview v3 SG DRAFT</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f1f5f9;overscroll-behavior:none}
@@ -55,7 +55,7 @@ button{font-family:inherit;touch-action:manipulation;user-select:none;-webkit-us
 <body>
 <div id="app">
   <div class="top">
-    <div><h1>O27 Button Speed Preview v2 SG DRAFT</h1><p class="sub" id="modeLine">Not connected</p></div>
+    <div><h1>O27 Button Speed Preview v3 SG DRAFT</h1><p class="sub" id="modeLine">Not connected</p></div>
     <button id="btnConnect" type="button">Connect controller</button>
   </div>
   <div id="read">0%</div>
@@ -79,7 +79,7 @@ button{font-family:inherit;touch-action:manipulation;user-select:none;-webkit-us
 <script>
 'use strict';
 // ── Presets (edit here) ──
-const SLOW=25, MEDIUM=50, FAST=75; // percent
+const SLOW=50, MEDIUM=75, FAST=100; // percent (v3: per Sam Nov 15)
 const STEP=5;                      // minus / plus step, percent
 
 // ── BLE (same UUIDs as UI v1.8; throttle write + status read only) ──
